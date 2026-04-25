@@ -54,7 +54,8 @@
             ]
           }
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "eas": {
