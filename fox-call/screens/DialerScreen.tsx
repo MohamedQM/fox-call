@@ -36,11 +36,15 @@ export default function DialerScreen({ user, phone, onPhoneChange, onCall, onLog
     return p;
   };
 
+  // Validate phone number - must be at least 5 digits
+  const canCall = phone.replace(/[^\d+]/g, '').length >= 5;
+
   return (
     <SafeAreaView style={S.wrap} edges={['top', 'bottom']}>
       <ScrollView
         contentContainerStyle={S.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={Colors.primary} />}
+        keyboardShouldPersistTaps="handled"
       >
         {/* Header */}
         <View style={S.header}>
@@ -106,8 +110,8 @@ export default function DialerScreen({ user, phone, onPhoneChange, onCall, onLog
         <View style={S.callBox}>
           <Pressable
             onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onCall(); }}
-            disabled={!phone}
-            style={({ pressed }) => [S.callBtnWrap, !phone && S.btnDisabled, pressed && S.btnPressed]}
+            disabled={!canCall}
+            style={({ pressed }) => [S.callBtnWrap, !canCall && S.btnDisabled, pressed && S.btnPressed]}
           >
             <LinearGradient colors={['#22C55E', '#16A34A']} style={S.callBtn}>
               <Ionicons name="call" size={32} color="#fff" />

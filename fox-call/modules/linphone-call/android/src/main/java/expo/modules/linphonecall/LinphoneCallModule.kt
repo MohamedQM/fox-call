@@ -40,6 +40,8 @@ class LinphoneCallModule : Module() {
 
   // Track call state for cleanup
   private var callActive = false
+  // Track if core has been started
+  private var coreStarted = false
 
   override fun definition() = ModuleDefinition {
     Name("LinphoneCall")
@@ -47,6 +49,8 @@ class LinphoneCallModule : Module() {
 
     AsyncFunction("startCall") { options: StartCallOptions, promise: Promise ->
       try {
+        // Clean up any previous call state before starting new call
+        cleanupPreviousCall()
         ensureCore()
         directCall(options, promise)
       } catch (e: Throwable) {
@@ -66,6 +70,8 @@ class LinphoneCallModule : Module() {
         } else {
           core?.calls?.firstOrNull()?.terminate()
         }
+        // Reset audio mode after hangup
+        resetAudioMode()
         promise.resolve(null)
       } catch (e: Throwable) {
         promise.reject("E_HANGUP", e.message ?: "hangup failed", e)
@@ -87,9 +93,22 @@ class LinphoneCallModule : Module() {
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.mode = AudioManager.MODE_IN_COMMUNICATION
         am.isSpeakerphoneOn = on
-        val targetType = if (on) AudioDevice.Type.Speaker else AudioDevice.Type.Earpiece
-        core?.audioDevices?.firstOrNull { it.type == targetType && it.hasCapability(AudioDevice.Capabilities.CapabilityPlay) }
-          ?.let { core?.outputAudioDevice = it }
+        // Try to route audio through Linphone audio device selection
+        try {
+          val targetType = if (on) AudioDevice.Type.Speaker else AudioDevice.Type.Earpiece
+          val device = core?.audioDevices?.firstOrNull {
+            it.type == targetType && it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
+          }
+          if (device != null) {
+            core?.outputAudioDevice = device
+            Log.d(TAG, "Audio output set to: ${device.deviceName} (${device.type})")
+          } else {
+            // Fallback: just use Android AudioManager
+            Log.w(TAG, "No Linphone audio device found for type $targetType, using AudioManager fallback")
+          }
+        } catch (audioErr: Throwable) {
+          Log.w(TAG, "Linphone audio device selection failed, using AudioManager: ${audioErr.message}")
+        }
         promise.resolve(null)
       } catch (e: Throwable) {
         promise.reject("E_SPK", e.message ?: "speaker failed", e)
@@ -109,9 +128,43 @@ class LinphoneCallModule : Module() {
     OnDestroy { teardown() }
   }
 
+  /**
+   * Clean up any previous call before starting a new one.
+   * This prevents resource leaks and state conflicts.
+   */
+  private fun cleanupPreviousCall() {
+    try {
+      core?.let { c ->
+        // Terminate any active calls
+        c.calls.forEach { try { it.terminate() } catch (_: Throwable) {} }
+
+        // Remove old accounts and auth info
+        c.accounts.toList().forEach { try { c.removeAccount(it) } catch (_: Throwable) {} }
+        c.authInfoList.toList().forEach { try { c.removeAuthInfo(it) } catch (_: Throwable) {} }
+      }
+    } catch (e: Throwable) {
+      Log.w(TAG, "cleanupPreviousCall warning: ${e.message}")
+    }
+    callActive = false
+  }
+
   private fun ensureCore() {
-    if (core != null) return
+    // If core exists and is started, just clean it up for reuse
+    if (core != null && coreStarted) {
+      Log.d(TAG, "Reusing existing Linphone Core")
+      cleanupPreviousCall()
+      return
+    }
+
+    // Teardown any old core first
+    if (core != null) {
+      Log.w(TAG, "Core exists but not started properly, recreating")
+      teardown()
+    }
+
     val ctx = appContext.reactContext ?: throw IllegalStateException("no context")
+    Log.d(TAG, "Creating new Linphone Core")
+
     Factory.instance().setLogCollectionPath(ctx.filesDir.absolutePath)
     Factory.instance().enableLogCollection(org.linphone.core.LogCollectionState.Enabled)
     Factory.instance().loggingService.setLogLevel(LogLevel.Message)
@@ -119,7 +172,7 @@ class LinphoneCallModule : Module() {
     val c = Factory.instance().createCore(null, null, ctx)
     c.isNetworkReachable = true
 
-    // Configure audio settings
+    // Configure audio settings for voice calls
     c.echoCancellationEnabled = true
     c.echoLimiterEnabled = true
 
@@ -131,9 +184,7 @@ class LinphoneCallModule : Module() {
       Log.w(TAG, "verifyServerCertificates/Cn not available: ${e.message}")
     }
 
-    c.start()
-    core = c
-
+    // Set up call state listener BEFORE starting core
     val l = object : CoreListenerStub() {
       override fun onCallStateChanged(core: Core, call: Call, state: Call.State, message: String) {
         Log.d(TAG, "Call state: $state ($message)")
@@ -144,28 +195,97 @@ class LinphoneCallModule : Module() {
           Call.State.Connected, Call.State.StreamsRunning -> {
             callActive = true
             emit("connected", "تم الاتصال")
+            // Ensure audio is routed properly when connected
+            main.post {
+              try {
+                routeAudioToEarpiece()
+              } catch (e: Throwable) {
+                Log.w(TAG, "Audio routing failed: ${e.message}")
+              }
+            }
           }
           Call.State.End, Call.State.Released -> {
             callActive = false
             emit("ended", "انتهت المكالمة")
+            // Reset audio mode after call ends
+            main.post {
+              try { resetAudioMode() } catch (_: Throwable) {}
+            }
           }
           Call.State.Error -> {
             callActive = false
             val reason = parseCallError(message)
             Log.e(TAG, "Call error: $reason (raw: $message)")
             emit("failed", reason)
+            // Reset audio mode on error
+            main.post {
+              try { resetAudioMode() } catch (_: Throwable) {}
+            }
           }
           else -> {}
         }
       }
 
       override fun onRegistrationStateChanged(core: Core, cfg: ProxyConfig, state: RegistrationState, message: String) {
-        // We don't use registration anymore - log only for debugging
+        // We don't use registration - direct call only
         Log.d(TAG, "Registration state (ignored): $state ($message)")
       }
     }
-    listener = l
+
     c.addListener(l)
+    listener = l
+    c.start()
+    core = c
+    coreStarted = true
+    Log.d(TAG, "Linphone Core created and started successfully")
+  }
+
+  /**
+   * Route audio to earpiece (default for phone calls).
+   * Must be called on main thread.
+   */
+  private fun routeAudioToEarpiece() {
+    val ctx = appContext.reactContext ?: return
+    val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    // Request audio focus for voice call
+    try {
+      am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+    } catch (e: Throwable) {
+      Log.w(TAG, "Audio focus request failed: ${e.message}")
+    }
+
+    am.mode = AudioManager.MODE_IN_COMMUNICATION
+    am.isSpeakerphoneOn = false
+
+    // Also try Linphone audio device routing
+    try {
+      val earpiece = core?.audioDevices?.firstOrNull {
+        it.type == AudioDevice.Type.Earpiece && it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
+      }
+      if (earpiece != null) {
+        core?.outputAudioDevice = earpiece
+        Log.d(TAG, "Audio routed to earpiece via Linphone")
+      }
+    } catch (e: Throwable) {
+      Log.w(TAG, "Linphone earpiece routing failed: ${e.message}")
+    }
+  }
+
+  /**
+   * Reset audio mode after call ends.
+   */
+  private fun resetAudioMode() {
+    try {
+      val ctx = appContext.reactContext ?: return
+      val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      am.mode = AudioManager.MODE_NORMAL
+      am.isSpeakerphoneOn = false
+      am.abandonAudioFocus(null)
+      Log.d(TAG, "Audio mode reset to normal")
+    } catch (e: Throwable) {
+      Log.w(TAG, "Audio mode reset failed: ${e.message}")
+    }
   }
 
   private fun parseCallError(message: String): String {
@@ -181,6 +301,8 @@ class LinphoneCallModule : Module() {
       lower.contains("503") || lower.contains("service unavailable") -> "الخدمة غير متاحة حالياً"
       lower.contains("network") || lower.contains("unreachable") -> "لا يمكن الوصول للخادم - تحقق من الإنترنت"
       lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") -> "مشكلة في الاتصال الآمن"
+      lower.contains("declined") || lower.contains("603") -> "تم رفض المكالمة"
+      lower.contains("io error") || lower.contains("connection refused") -> "فشل الاتصال بالخادم - تحقق من الإنترنت"
       else -> message.ifEmpty { "فشل الاتصال - حاول مرة أخرى" }
     }
   }
@@ -189,7 +311,9 @@ class LinphoneCallModule : Module() {
     main.post {
       try {
         sendEvent("onCall", mapOf("state" to state, "reason" to (reason ?: "")))
-      } catch (_: Throwable) {}
+      } catch (e: Throwable) {
+        Log.w(TAG, "Failed to emit event: ${e.message}")
+      }
     }
   }
 
@@ -201,30 +325,6 @@ class LinphoneCallModule : Module() {
    */
   private fun directCall(o: StartCallOptions, promise: Promise) {
     val c = core ?: throw IllegalStateException("Core not initialized")
-
-    // Terminate any existing calls
-    c.calls.forEach { try { it.terminate() } catch (_: Throwable) {} }
-
-    // Clean up previous accounts
-    try {
-      // Remove all existing accounts to avoid conflicts
-      val existingAccounts = c.accounts.toList()
-      for (account in existingAccounts) {
-        try { c.removeAccount(account) } catch (_: Throwable) {}
-      }
-    } catch (e: Throwable) {
-      Log.w(TAG, "Warning clearing accounts: ${e.message}")
-    }
-
-    // Also clear auth info
-    try {
-      val existingAuth = c.authInfoList.toList()
-      for (auth in existingAuth) {
-        try { c.removeAuthInfo(auth) } catch (_: Throwable) {}
-      }
-    } catch (e: Throwable) {
-      Log.w(TAG, "Warning clearing auth info: ${e.message}")
-    }
 
     val transport = when (o.protocol.lowercase()) {
       "tls" -> TransportType.Tls
@@ -282,6 +382,23 @@ class LinphoneCallModule : Module() {
 
     Log.d(TAG, "Account created and set as default (registration disabled)")
 
+    // Set up audio mode BEFORE placing the call
+    main.post {
+      try {
+        val ctx = appContext.reactContext
+        if (ctx != null) {
+          val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+          // Request audio focus
+          am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+          am.mode = AudioManager.MODE_IN_COMMUNICATION
+          am.isSpeakerphoneOn = false
+          Log.d(TAG, "Audio mode set to IN_COMMUNICATION")
+        }
+      } catch (e: Throwable) {
+        Log.w(TAG, "Audio setup failed: ${e.message}")
+      }
+    }
+
     // Place the call immediately - no need to wait for registration
     emit("outgoing_init", "جاري الاتصال...")
 
@@ -291,6 +408,8 @@ class LinphoneCallModule : Module() {
       promise.resolve(null)
     } catch (e: Throwable) {
       Log.e(TAG, "placeCall failed", e)
+      // Clean up audio mode on failure
+      main.post { try { resetAudioMode() } catch (_: Throwable) {} }
       emit("failed", e.message ?: "فشل بدء المكالمة")
       promise.reject("E_CALL", e.message ?: "فشل بدء المكالمة", e)
     }
@@ -322,22 +441,11 @@ class LinphoneCallModule : Module() {
     } else {
       c.inviteAddress(callAddr)
     }
-
-    // Auto-route audio to earpiece by default
-    main.post {
-      try {
-        val ctx = appContext.reactContext
-        if (ctx != null) {
-          val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-          am.mode = AudioManager.MODE_IN_COMMUNICATION
-          am.isSpeakerphoneOn = false
-        }
-      } catch (_: Throwable) {}
-    }
   }
 
   private fun teardown() {
     callActive = false
+    coreStarted = false
     try {
       core?.let { c ->
         listener?.let { c.removeListener(it) }
@@ -347,5 +455,8 @@ class LinphoneCallModule : Module() {
     } catch (_: Throwable) {}
     core = null
     listener = null
+
+    // Reset audio mode
+    try { resetAudioMode() } catch (_: Throwable) {}
   }
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, Text, StyleSheet, Alert, PermissionsAndroid, Platform, ActivityIndicator } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -56,22 +56,29 @@ export default function App() {
         const ok = await connect(tok, did);
         if (ok) return;
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[App] Bootstrap error:', e);
+    }
     setScreen('token');
   };
 
   const requestMicPermission = async () => {
     if (Platform.OS !== 'android') return true;
-    const r = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-      {
-        title: 'صلاحية الميكروفون',
-        message: 'يحتاج التطبيق الميكروفون لإجراء المكالمات الصوتية',
-        buttonPositive: 'سماح',
-        buttonNegative: 'رفض',
-      }
-    );
-    return r === PermissionsAndroid.RESULTS.GRANTED;
+    try {
+      const r = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        {
+          title: 'صلاحية الميكروفون',
+          message: 'يحتاج التطبيق الميكروفون لإجراء المكالمات الصوتية',
+          buttonPositive: 'سماح',
+          buttonNegative: 'رفض',
+        }
+      );
+      return r === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (e) {
+      console.warn('[App] Mic permission error:', e);
+      return false;
+    }
   };
 
   const connect = async (rawToken: string, deviceId?: string): Promise<boolean> => {
@@ -90,57 +97,91 @@ export default function App() {
 
   const handleConnect = async (token: string) => { await connect(token); };
 
-  const refreshMe = async () => {
+  const refreshMe = useCallback(async () => {
     if (!apiRef.current) return;
     try {
       const me = await apiRef.current.getMe();
       setUser(me);
-    } catch {}
-  };
+    } catch (e) {
+      console.warn('[App] Refresh error:', e);
+    }
+  }, []);
 
-  const handleCall = async () => {
+  const handleCall = useCallback(async () => {
     if (!phone || !cmRef.current) return;
+
+    // Check if already in a call
+    if (cmRef.current.isCalling()) {
+      Alert.alert('تنبيه', 'يوجد مكالمة جارية بالفعل');
+      return;
+    }
+
     const ok = await requestMicPermission();
     if (!ok) {
       Alert.alert('تنبيه', 'لازم تسمح للميكروفون عشان تعمل مكالمة');
       return;
     }
+
     const cm = cmRef.current;
     cm.on({
-      onState: setCallState,
-      onDuration: setCallDuration,
-      onError: (m) => Alert.alert('فشل', m),
+      onState: (s: CallState) => {
+        setCallState(s);
+      },
+      onDuration: (sec: number) => {
+        setCallDuration(sec);
+      },
+      onError: (msg: string) => {
+        // Show error alert
+        Alert.alert('فشل المكالمة', msg);
+      },
       onEnd: () => {
-        setTimeout(() => {
-          setScreen('dialer');
-          setCallState('idle');
-          setCallDuration(0);
-          setCallFrom('');
-          setMuted(false);
-          setSpeaker(false);
-          refreshMe();
-        }, 1500);
+        // Go back to dialer screen
+        setScreen('dialer');
+        setCallState('idle');
+        setCallDuration(0);
+        setCallFrom('');
+        setMuted(false);
+        setSpeaker(false);
+        // Refresh balance after call ends
+        refreshMe();
       },
     });
+
     setScreen('call');
     setCallState('connecting');
     setCallDuration(0);
     setMuted(false);
     setSpeaker(false);
+
     try {
       const r = await cm.startCall(phone);
       setCallFrom(r.from || '');
       setCallLimit(r.sip.callLimit || 0);
     } catch (e: any) {
-      // error already shown via listener
+      // Error is already handled via listener (onError + onEnd)
+      // But if we're still on call screen after error, go back
+      console.warn('[App] startCall error:', e?.message);
+      // The onEnd callback in the listener will handle going back to dialer
     }
-  };
+  }, [phone, refreshMe]);
 
-  const handleHangup = () => cmRef.current?.hangup();
-  const handleMute = async () => { const m = await cmRef.current!.toggleMute(); setMuted(m); };
-  const handleSpeaker = async () => { const s = await cmRef.current!.toggleSpeaker(); setSpeaker(s); };
+  const handleHangup = useCallback(() => {
+    cmRef.current?.hangup();
+  }, []);
 
-  const handleLogout = async () => {
+  const handleMute = useCallback(async () => {
+    if (!cmRef.current) return;
+    const m = await cmRef.current.toggleMute();
+    setMuted(m);
+  }, []);
+
+  const handleSpeaker = useCallback(async () => {
+    if (!cmRef.current) return;
+    const s = await cmRef.current.toggleSpeaker();
+    setSpeaker(s);
+  }, []);
+
+  const handleLogout = useCallback(async () => {
     Alert.alert('تأكيد', 'تريد تسجيل الخروج؟', [
       { text: 'إلغاء', style: 'cancel' },
       {
@@ -148,14 +189,18 @@ export default function App() {
           cmRef.current?.destroy();
           apiRef.current = null;
           cmRef.current = null;
-          await SecureStore.deleteItemAsync(TOKEN_KEY);
+          try {
+            await SecureStore.deleteItemAsync(TOKEN_KEY);
+          } catch (e) {
+            console.warn('[App] Logout clear error:', e);
+          }
           setUser(null);
           setPhone('');
           setScreen('token');
         },
       },
     ]);
-  };
+  }, []);
 
   return (
     <SafeAreaProvider>

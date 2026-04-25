@@ -30,6 +30,7 @@ const stateLabel = (s: CallState) =>
 const stateColor = (s: CallState) =>
   s === 'connected' ? Colors.success :
   s === 'failed' ? Colors.danger :
+  s === 'ended' ? Colors.textMuted :
   Colors.warning;
 
 const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
@@ -37,6 +38,9 @@ const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${Str
 export default function CallScreen({
   phone, fromNumber, state, duration, callLimit, muted, speaker, onHangup, onMute, onSpeaker,
 }: Props) {
+  const isCallActive = state === 'connecting' || state === 'ringing' || state === 'connected';
+  const isCallOver = state === 'ended' || state === 'failed';
+
   return (
     <LinearGradient colors={[Colors.bg, '#1a1438', Colors.bg]} style={S.wrap}>
       <SafeAreaView style={S.safe} edges={['top', 'bottom']}>
@@ -60,41 +64,61 @@ export default function CallScreen({
           ) : (
             <Text style={S.timerHint}>
               {state === 'ringing' ? '○ ○ ○' : ''}
+              {state === 'connecting' ? '● ● ●' : ''}
             </Text>
           )}
           {fromNumber ? (
             <Text style={S.from}>من: {fromNumber}</Text>
           ) : null}
-          {callLimit > 0 ? (
-            <Text style={S.limit}>الحد الأقصى: {Math.floor(callLimit / 60)}:{String(callLimit % 60).padStart(2, '0')}</Text>
+          {callLimit > 0 && state === 'connected' ? (
+            <Text style={S.limit}>
+              متبقي {fmt(Math.max(0, callLimit - duration))}
+            </Text>
           ) : null}
+          {isCallOver && (
+            <Text style={S.overMsg}>
+              {state === 'failed' ? 'فشل الاتصال - سيتم العودة تلقائياً' : 'انتهت المكالمة'}
+            </Text>
+          )}
         </View>
 
         <View style={S.actions}>
-          <Pressable
-            onPress={() => { Haptics.selectionAsync(); onMute(); }}
-            style={({ pressed }) => [S.action, muted && S.actionActive, pressed && S.actionPressed]}
-          >
-            <Ionicons name={muted ? 'mic-off' : 'mic'} size={26} color={muted ? Colors.danger : Colors.text} />
-            <Text style={[S.actionLbl, muted && { color: Colors.danger }]}>{muted ? 'مكتوم' : 'مايك'}</Text>
-          </Pressable>
+          {isCallActive ? (
+            <>
+              <Pressable
+                onPress={() => { Haptics.selectionAsync(); onMute(); }}
+                style={({ pressed }) => [S.action, muted && S.actionActive, pressed && S.actionPressed]}
+              >
+                <Ionicons name={muted ? 'mic-off' : 'mic'} size={26} color={muted ? Colors.danger : Colors.text} />
+                <Text style={[S.actionLbl, muted && { color: Colors.danger }]}>{muted ? 'مكتوم' : 'مايك'}</Text>
+              </Pressable>
 
-          <Pressable
-            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); onHangup(); }}
-            style={({ pressed }) => [S.hangupWrap, pressed && S.actionPressed]}
-          >
-            <LinearGradient colors={[Colors.danger, Colors.dangerDim]} style={S.hangup}>
-              <Ionicons name="call" size={32} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
-            </LinearGradient>
-          </Pressable>
+              <Pressable
+                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); onHangup(); }}
+                style={({ pressed }) => [S.hangupWrap, pressed && S.actionPressed]}
+              >
+                <LinearGradient colors={[Colors.danger, Colors.dangerDim]} style={S.hangup}>
+                  <Ionicons name="call" size={32} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
+                </LinearGradient>
+              </Pressable>
 
-          <Pressable
-            onPress={() => { Haptics.selectionAsync(); onSpeaker(); }}
-            style={({ pressed }) => [S.action, speaker && S.actionActive, pressed && S.actionPressed]}
-          >
-            <Ionicons name={speaker ? 'volume-high' : 'volume-medium'} size={26} color={speaker ? Colors.primary : Colors.text} />
-            <Text style={[S.actionLbl, speaker && { color: Colors.primary }]}>سماعة</Text>
-          </Pressable>
+              <Pressable
+                onPress={() => { Haptics.selectionAsync(); onSpeaker(); }}
+                style={({ pressed }) => [S.action, speaker && S.actionActive, pressed && S.actionPressed]}
+              >
+                <Ionicons name={speaker ? 'volume-high' : 'volume-medium'} size={26} color={speaker ? Colors.primary : Colors.text} />
+                <Text style={[S.actionLbl, speaker && { color: Colors.primary }]}>سماعة</Text>
+              </Pressable>
+            </>
+          ) : (
+            <Pressable
+              onPress={onHangup}
+              style={({ pressed }) => [S.backBtn, pressed && S.actionPressed]}
+            >
+              <Ionicons name="arrow-back" size={24} color={Colors.text} />
+              <Text style={S.backBtnTxt}>رجوع</Text>
+            </Pressable>
+          )}
         </View>
       </SafeAreaView>
     </LinearGradient>
@@ -133,7 +157,11 @@ const S = StyleSheet.create({
   },
   timerHint: { color: Colors.textDim, fontSize: 24, marginTop: Spacing.md, letterSpacing: 6 },
   from: { color: Colors.textMuted, fontSize: 13, marginTop: 8, fontFamily: 'monospace' },
-  limit: { color: Colors.textDim, fontSize: 11, marginTop: 6 },
+  limit: { color: Colors.warning, fontSize: 13, marginTop: 6, fontWeight: '600' },
+  overMsg: {
+    color: Colors.danger, fontSize: 14, marginTop: 12,
+    fontWeight: '500', textAlign: 'center',
+  },
 
   actions: {
     flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
@@ -155,4 +183,12 @@ const S = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
     shadowColor: Colors.danger, shadowOpacity: 0.6, shadowRadius: 20,
   },
+
+  backBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, paddingVertical: 14, paddingHorizontal: 32,
+    backgroundColor: Colors.bgElevated, borderRadius: Radii.xl,
+    borderWidth: 1, borderColor: Colors.border,
+  },
+  backBtnTxt: { color: Colors.text, fontSize: 16, fontWeight: '600' },
 });

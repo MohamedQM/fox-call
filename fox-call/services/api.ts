@@ -23,6 +23,7 @@ export interface CallStartResult {
   from: string;
   to: string;
   balance: number;
+  callId?: string;
 }
 
 export class FoxApi {
@@ -47,19 +48,17 @@ export class FoxApi {
       'x-user-id': this.userId,
       'x-device-id': this.deviceId,
       'content-type': 'application/json',
+      'accept': 'application/json',
     };
   }
 
-  private async fetchOne(baseUrl: string, method: string, path: string, body?: unknown): Promise<Response> {
-    const url = `${baseUrl}${path}`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
+  private async fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 15000): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(url, {
-        method,
-        headers: this.headers(),
-        body: body ? JSON.stringify(body) : undefined,
-        signal: ctrl.signal,
+        ...options,
+        signal: controller.signal,
       });
     } finally {
       clearTimeout(timer);
@@ -67,27 +66,52 @@ export class FoxApi {
   }
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const baseUrl = this.serverUrl;
-    let lastErr: Error = new Error('تعذّر الاتصال بالسيرفر');
+    const url = `${this.serverUrl}${path}`;
 
     try {
-      const res = await this.fetchOne(baseUrl, method, path, body);
+      const res = await this.fetchWithTimeout(url, {
+        method,
+        headers: this.headers(),
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
       const text = await res.text();
       let data: any = {};
-      try { data = text ? JSON.parse(text) : {}; } catch { /* not json */ }
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        // Response is not JSON
+      }
+
       if (!res.ok) {
-        const msg = data?.error || `خطأ ${res.status}`;
+        // Try to get error message from response
+        const msg = data?.error || data?.message || data?.detail || `خطأ ${res.status}`;
+
+        // Handle specific status codes
+        if (res.status === 401) {
+          throw new Error('التوكن منتهي أو غير صالح - سجّل دخول مرة أخرى');
+        }
+        if (res.status === 402 || res.status === 403) {
+          throw new Error('الرصيد غير كافي - اشحن رصيدك أولاً');
+        }
+        if (res.status === 429) {
+          throw new Error('طلبات كثيرة - انتظر قليلاً وحاول مرة أخرى');
+        }
+
         throw new Error(msg);
       }
+
       return data as T;
     } catch (e: any) {
       if (e.name === 'AbortError') {
-        lastErr = new Error('انقطع الاتصال بالسيرفر');
-      } else {
-        lastErr = e;
+        throw new Error('انقطع الاتصال بالسيرفر - تحقق من الإنترنت');
       }
+      if (e.message === 'Network request failed') {
+        throw new Error('لا يوجد اتصال بالإنترنت');
+      }
+      // Re-throw if already a friendly error
+      throw e;
     }
-    throw lastErr;
   }
 
   getMe() {
