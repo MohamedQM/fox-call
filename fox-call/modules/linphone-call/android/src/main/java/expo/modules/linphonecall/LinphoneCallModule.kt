@@ -139,7 +139,9 @@ class LinphoneCallModule : Module() {
         c.calls.forEach { try { it.terminate() } catch (_: Throwable) {} }
 
         // Remove old accounts and auth info
-        c.accounts.toList().forEach { try { c.removeAccount(it) } catch (_: Throwable) {} }
+        // Use accountList (Linphone SDK 5.x API) with fallback to accounts
+        val accountList = try { c.accountList.toList() } catch (_: Throwable) { try { c.accounts.toList() } catch (_: Throwable) { emptyList() } }
+        accountList.forEach { try { c.removeAccount(it) } catch (_: Throwable) {} }
         c.authInfoList.toList().forEach { try { c.removeAuthInfo(it) } catch (_: Throwable) {} }
       }
     } catch (e: Throwable) {
