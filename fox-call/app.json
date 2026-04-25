@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Fox Call",
+    "slug": "fox-call",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "scheme": "foxcall",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0E27"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.dlmzqqlje.foxcall",
+      "infoPlist": {
+        "UIBackgroundModes": ["voip", "audio"]
+      }
+    },
+    "android": {
+      "package": "com.dlmzqqlje.foxcall",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0E27"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "RECORD_AUDIO",
+        "CALL_PHONE",
+        "READ_PHONE_STATE",
+        "VIBRATE",
+        "WAKE_LOCK",
+        "FOREGROUND_SERVICE",
+        "INTERNET"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "bb785610-b314-45c1-845a-0ede6e1353fd"
+      }
+    },
+    "owner": "dlmzqqlje"
+  }
+}
