@@ -173,8 +173,8 @@ class LinphoneCallModule : Module() {
     c.isNetworkReachable = true
 
     // Configure audio settings for voice calls
-    c.echoCancellationEnabled = true
-    c.echoLimiterEnabled = true
+    c.isEchoCancellationEnabled = true
+    c.isEchoLimiterEnabled = true
 
     // Disable TLS certificate verification for self-signed certs
     try {
@@ -433,7 +433,7 @@ class LinphoneCallModule : Module() {
     // Create call params
     val callParams = c.createCallParams(null)
     callParams?.mediaEncryption = MediaEncryption.None
-    callParams?.enableEarlyMediaSending = true
+    callParams?.isEarlyMediaSendingEnabled = true
 
     // Place the call
     if (callParams != null) {
